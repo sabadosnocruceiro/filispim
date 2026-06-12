@@ -829,7 +829,8 @@
     loadSchedule();
     setInterval(loadSchedule, 5 * 60 * 1000);
 
-    const RSS_URL = "https://api.rss2json.com/v1/api.json?rss_url=" + encodeURIComponent("http://opaii.blogspot.com/feeds/posts/default?alt=rss");
+    const RSS_FEED = "https://opaii.blogspot.com/feeds/posts/default?alt=rss";
+    const RSS_API = "https://api.rss2json.com/v1/api.json?rss_url=";
     const newsGrid = document.getElementById("news-grid");
 
     function stripHtml(html) {
@@ -851,24 +852,36 @@
         <article class="post">
           <div class="post-meta">Blog oficial</div>
           <h3>Últimas novas de Rádio FilispiM</h3>
-          <p>Non se puido cargar o RSS automaticamente.</p>
+          <p>Non se puido cargar o RSS automaticamente. Pode ser caché do servizo RSS ou bloqueo temporal.</p>
           <a href="https://opaii.blogspot.com" target="_blank" rel="noopener">Abrir blog →</a>
         </article>
       `;
     }
 
-    fetch(RSS_URL)
-      .then(response => response.json())
-      .then(data => {
+    async function loadRSS() {
+      try {
+        newsGrid.setAttribute("aria-busy", "true");
+
+        const rssUrl = RSS_API + encodeURIComponent(RSS_FEED) + "&_=" + Date.now();
+        const response = await fetch(rssUrl, { cache: "no-store" });
+
+        if (!response.ok) {
+          throw new Error("RSS error " + response.status);
+        }
+
+        const data = await response.json();
+
         if (!data.items || !data.items.length) {
           fallbackNews();
           return;
         }
+
         newsGrid.innerHTML = data.items.slice(0,5).map(item => {
           const title = item.title || "Entrada sen título";
           const excerpt = stripHtml(item.description).slice(0,130);
           const date = formatDate(item.pubDate);
           const link = item.link || "https://opaii.blogspot.com";
+
           return `
             <article class="post">
               <div class="post-meta">${date}</div>
@@ -878,8 +891,16 @@
             </article>
           `;
         }).join("");
-      })
-      .catch(fallbackNews);
+      } catch(e) {
+        console.error("Erro cargando RSS", e);
+        fallbackNews();
+      } finally {
+        newsGrid.removeAttribute("aria-busy");
+      }
+    }
+
+    loadRSS();
+    setInterval(loadRSS, 10 * 60 * 1000);
   </script>
 </body>
 </html>
