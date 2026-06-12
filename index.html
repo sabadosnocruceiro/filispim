@@ -829,9 +829,18 @@
     loadSchedule();
     setInterval(loadSchedule, 5 * 60 * 1000);
 
-    const RSS_FEED = "https://opaii.blogspot.com/feeds/posts/default?alt=rss";
-    const RSS_API = "https://api.rss2json.com/v1/api.json?rss_url=";
+    /*
+      NOVAS DO BLOG OPAII
+      Corrección importante:
+      Non usamos rss2json nin fetch ao RSS porque pode fallar por caché, CORS
+      ou límites do servizo externo. Blogger permite JSONP con alt=json-in-script,
+      que funciona mellor en HTML estático, WordPress e móbil.
+    */
+    const BLOG_URL = "https://opaii.blogspot.com";
+    const BLOGGER_FEED = BLOG_URL + "/feeds/posts/default";
     const newsGrid = document.getElementById("news-grid");
+    let bloggerJsonpScript = null;
+    let bloggerJsonpTimer = null;
 
     function stripHtml(html) {
       const div = document.createElement("div");
@@ -839,64 +848,107 @@
       return (div.textContent || div.innerText || "").replace(/\s+/g, " ").trim();
     }
 
-    function formatDate(dateString) {
-      try {
-        return new Intl.DateTimeFormat("gl-ES", {day:"2-digit", month:"long", year:"numeric"}).format(new Date(dateString));
-      } catch(e) {
-        return "";
-      }
+    function escapeHtml(text) {
+      return String(text || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
     }
 
-    function fallbackNews() {
+    function formatDate(dateString) {
+      const d = new Date(dateString);
+      if (Number.isNaN(d.getTime())) return "Blog OPAII";
+      return new Intl.DateTimeFormat("gl-ES", {
+        day: "2-digit",
+        month: "long",
+        year: "numeric"
+      }).format(d);
+    }
+
+    function getAlternateLink(entry) {
+      const links = entry.link || [];
+      const alternate = links.find(link => link.rel === "alternate");
+      return alternate ? alternate.href : BLOG_URL;
+    }
+
+    function getEntryText(entry) {
+      return stripHtml(
+        (entry.summary && entry.summary.$t) ||
+        (entry.content && entry.content.$t) ||
+        ""
+      );
+    }
+
+    function fallbackNews(message) {
       newsGrid.innerHTML = `
         <article class="post">
           <div class="post-meta">Blog oficial</div>
           <h3>Últimas novas de Rádio FilispiM</h3>
-          <p>Non se puido cargar o RSS automaticamente. Pode ser caché do servizo RSS ou bloqueo temporal.</p>
-          <a href="https://opaii.blogspot.com" target="_blank" rel="noopener">Abrir blog →</a>
+          <p>${escapeHtml(message || "Non se puido cargar o feed automaticamente neste momento.")}</p>
+          <a href="${BLOG_URL}" target="_blank" rel="noopener">Abrir blog →</a>
         </article>
       `;
     }
 
-    async function loadRSS() {
-      try {
-        newsGrid.setAttribute("aria-busy", "true");
+    window.renderBloggerPosts = function(data) {
+      clearTimeout(bloggerJsonpTimer);
+      newsGrid.removeAttribute("aria-busy");
 
-        const rssUrl = RSS_API + encodeURIComponent(RSS_FEED) + "&_=" + Date.now();
-        const response = await fetch(rssUrl, { cache: "no-store" });
+      const entries = data && data.feed && data.feed.entry ? data.feed.entry : [];
 
-        if (!response.ok) {
-          throw new Error("RSS error " + response.status);
-        }
-
-        const data = await response.json();
-
-        if (!data.items || !data.items.length) {
-          fallbackNews();
-          return;
-        }
-
-        newsGrid.innerHTML = data.items.slice(0,5).map(item => {
-          const title = item.title || "Entrada sen título";
-          const excerpt = stripHtml(item.description).slice(0,130);
-          const date = formatDate(item.pubDate);
-          const link = item.link || "https://opaii.blogspot.com";
-
-          return `
-            <article class="post">
-              <div class="post-meta">${date}</div>
-              <h3>${title}</h3>
-              <p>${excerpt}${excerpt.length >= 130 ? "..." : ""}</p>
-              <a href="${link}" target="_blank" rel="noopener">Ler máis →</a>
-            </article>
-          `;
-        }).join("");
-      } catch(e) {
-        console.error("Erro cargando RSS", e);
-        fallbackNews();
-      } finally {
-        newsGrid.removeAttribute("aria-busy");
+      if (!entries.length) {
+        fallbackNews("O blog non devolveu entradas. Revisa que o feed estea activado en Blogger.");
+        return;
       }
+
+      newsGrid.innerHTML = entries.slice(0, 5).map(entry => {
+        const title = entry.title && entry.title.$t ? entry.title.$t : "Entrada sen título";
+        const text = getEntryText(entry);
+        const excerpt = text.length > 130 ? text.slice(0, 130) + "..." : text;
+        const date = formatDate(entry.published && entry.published.$t);
+        const link = getAlternateLink(entry);
+
+        return `
+          <article class="post">
+            <div class="post-meta">${escapeHtml(date)}</div>
+            <h3>${escapeHtml(title)}</h3>
+            <p>${escapeHtml(excerpt)}</p>
+            <a href="${escapeHtml(link)}" target="_blank" rel="noopener">Ler máis →</a>
+          </article>
+        `;
+      }).join("");
+    };
+
+    function loadRSS() {
+      newsGrid.setAttribute("aria-busy", "true");
+
+      if (bloggerJsonpScript) {
+        bloggerJsonpScript.remove();
+        bloggerJsonpScript = null;
+      }
+
+      clearTimeout(bloggerJsonpTimer);
+
+      bloggerJsonpScript = document.createElement("script");
+      bloggerJsonpScript.src = BLOGGER_FEED
+        + "?alt=json-in-script"
+        + "&callback=renderBloggerPosts"
+        + "&max-results=5"
+        + "&_=" + Date.now();
+      bloggerJsonpScript.async = true;
+      bloggerJsonpScript.onerror = function() {
+        newsGrid.removeAttribute("aria-busy");
+        fallbackNews("Non se puido conectar co feed de Blogger. Comproba que o blog sexa público e que os feeds estean activos.");
+      };
+
+      bloggerJsonpTimer = setTimeout(function() {
+        newsGrid.removeAttribute("aria-busy");
+        fallbackNews("O feed tardou demasiado en responder. Podes abrir o blog directamente.");
+      }, 9000);
+
+      document.body.appendChild(bloggerJsonpScript);
     }
 
     loadRSS();
